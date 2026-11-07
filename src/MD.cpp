@@ -466,7 +466,7 @@ double Potential() {
   double Pot = 0.0;
   int i;
 
-#pragma omp parallel for reduction(+ : Pot) schedule(guided)
+#pragma omp parallel for reduction(+ : Pot) schedule(dynamic, 16)
   for (i = 0; i < N - 1; i++) {
     double rxi = r[i][0];
     double ryi = r[i][1];
@@ -506,28 +506,10 @@ void computeAccelerations() {
     // dispensa o ciclo de limpeza)
     double ax = 0.0, ay = 0.0, az = 0.0;
 
-    // Interações com partículas j < i (sem instrução condicional no laço)
-    for (int j = 0; j < i; j++) {
-      double dx = rxi - r[j][0];
-      double dy = ryi - r[j][1];
-      double dz = rzi - r[j][2];
+    for (int j = 0; j < N; j++) {
+      if (i == j)
+        continue;
 
-      double rSqd = dx * dx + dy * dy + dz * dz;
-
-      double inv_r2 = 1.0 / rSqd;
-      double inv_r4 = inv_r2 * inv_r2;
-      double inv_r8 = inv_r4 * inv_r4;
-      double inv_r14 = inv_r8 * inv_r4 * inv_r2;
-
-      double f = 24.0 * (2.0 * inv_r14 - inv_r8);
-
-      ax += dx * f;
-      ay += dy * f;
-      az += dz * f;
-    }
-
-    // Interações com partículas j > i (salta automaticamente j == i)
-    for (int j = i + 1; j < N; j++) {
       double dx = rxi - r[j][0];
       double dy = ryi - r[j][1];
       double dz = rzi - r[j][2];
