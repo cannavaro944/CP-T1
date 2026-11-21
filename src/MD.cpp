@@ -496,7 +496,6 @@ void computeAccelerations() {
     double axi = 0.0, ayi = 0.0, azi = 0.0;
     double local_pot = 0.0;
 
-#pragma omp simd reduction(+ : axi, ayi, azi, local_pot)
     for (int j = 0; j < i; j++) {
       double dx = rxi - rx[j];
       double dy = ryi - ry[j];
@@ -511,7 +510,6 @@ void computeAccelerations() {
       azi += dz * f;
     }
 
-#pragma omp simd reduction(+ : axi, ayi, azi, local_pot)
     for (int j = i + 1; j < N; j++) {
       double dx = rxi - rx[j];
       double dy = ryi - ry[j];

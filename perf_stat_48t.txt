@@ -1,0 +1,16 @@
+
+ Performance counter stats for './md':
+
+   106,954,506,146      cycles                                                      
+    31,565,466,680      instructions              #    0.30  insn per cycle         
+     5,161,175,096      cache-references                                            
+       488,320,269      cache-misses              #    9.461 % of all cache refs    
+     5,161,173,305      L1-dcache-loads                                             
+       488,320,269      L1-dcache-load-misses     #    9.46% of all L1-dcache accesses
+
+       1.188934102 seconds time elapsed
+
+      53.453356000 seconds user
+       0.019885000 seconds sys
+
+

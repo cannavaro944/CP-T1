@@ -1,0 +1,40 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 231K of event 'cycles'
+# Event count (approx.): 112400453944
+#
+# Children      Self  Command  Shared Object       Symbol                                         
+# ........  ........  .......  ..................  ...............................................
+#
+    97.88%     0.00%  md       libc-2.28.so        [.] thread_start
+            |
+            ---thread_start
+               start_thread
+               |          
+                --97.88%--gomp_thread_start
+                          |          
+                          |--86.34%--computeAccelerations
+                          |          
+                          |--5.40%--gomp_team_barrier_wait_end
+                          |          
+                          |--4.17%--gomp_barrier_wait_end
+                          |          
+                          |--0.73%--MeanSquaredVelocity
+                          |          
+                           --0.64%--Kinetic
+
+    97.88%     0.00%  md       libpthread-2.28.so  [.] start_thread
+            |
+            ---start_thread
+               |          
+                --97.88%--gomp_thread_start
+                          |          
+                          |--86.34%--computeAccelerations
+                          |          
+                          |--5.40%--gomp_team_barrier_wait_end
+                          |          
+                          |--4.17%--gomp_barrier_wait_end
+                          |          
