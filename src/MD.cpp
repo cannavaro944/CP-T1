@@ -282,6 +282,13 @@ int main() {
   Tavg = 0;
 
   int tenp = floor(NumTime / 10);
+  // Constantes invariantes pré-calculadas fora do ciclo temporal principal
+  const double VolSI = Vol * VolFac;
+  const double dt_SI = dt * timefac;
+  const double temp_scale = (m / (3.0 * kB)) * TempFac;
+  const double gc_scale = (NA * VolSI) / N;
+  const double Z_scale = VolSI / (N * kBSI);
+
   fprintf(ofp,
           "  time (s)              T(t) (K)              P(t) (Pa)           "
           "Kinetic En. (n.u.)     Potential En. (n.u.) Total En. (n.u.)\n");
@@ -330,28 +337,28 @@ int main() {
     PE = Potential();
 
     // Temperature from Kinetic Theory
-    Temp = m * mvs / (3 * kB) * TempFac;
+    Temp = mvs * temp_scale;
 
     // Instantaneous gas constant and compressibility - not well defined because
     // pressure may be zero in some instances because there will be zero wall
     // collisions, pressure may be very high in some instances because there
     // will be a number of collisions
-    gc = NA * Press * (Vol * VolFac) / (N * Temp);
-    Z = Press * (Vol * VolFac) / (N * kBSI * Temp);
+    gc = (Press * gc_scale) / Temp;
+    Z = (Press * Z_scale) / Temp;
 
     Tavg += Temp;
     Pavg += Press;
 
     fprintf(ofp, "  %8.4e  %20.8f  %20.8f %20.8f  %20.8f  %20.8f \n",
-            i * dt * timefac, Temp, Press, KE, PE, KE + PE);
+            i * dt_SI, Temp, Press, KE, PE, KE + PE);
   }
 
   // Because we have calculated the instantaneous temperature and pressure,
   // we can take the average over the whole simulation here
   Pavg /= NumTime;
   Tavg /= NumTime;
-  Z = Pavg * (Vol * VolFac) / (N * kBSI * Tavg);
-  gc = NA * Pavg * (Vol * VolFac) / (N * Tavg);
+  Z = (Pavg * Z_scale) / Tavg;
+  gc = (Pavg * gc_scale) / Tavg;
   fprintf(afp, "  Total Time (s)      T (K)               P (Pa)      PV/nT "
                "(J/(mol K))         Z           V (m^3)              N\n");
   fprintf(afp,
@@ -360,7 +367,7 @@ int main() {
   fprintf(afp,
           "  %8.4e  %15.5f       %15.5f     %10.5f       %10.5f        %10.5e  "
           "       %i\n",
-          i * dt * timefac, Tavg, Pavg, gc, Z, Vol * VolFac, N);
+          i * dt_SI, Tavg, Pavg, gc, Z, VolSI, N);
 
   printf("\n  TO ANIMATE YOUR SIMULATION, OPEN THE FILE \n  '%s' WITH VMD "
          "AFTER THE SIMULATION COMPLETES\n",
@@ -434,40 +441,44 @@ void initialize() {
 
 //  Function to calculate the averaged velocity squared
 double MeanSquaredVelocity() {
-  double vx2 = 0, vy2 = 0, vz2 = 0;
+  const double inv_N = 1.0 / N;
+  double vx2 = 0.0, vy2 = 0.0, vz2 = 0.0;
 
 #pragma omp parallel for reduction(+ : vx2, vy2, vz2) schedule(static)
   for (int i = 0; i < N; i++) {
-    vx2 += v[i][0] * v[i][0];
-    vy2 += v[i][1] * v[i][1];
-    vz2 += v[i][2] * v[i][2];
+    double vx = v[i][0];
+    double vy = v[i][1];
+    double vz = v[i][2];
+    vx2 += vx * vx;
+    vy2 += vy * vy;
+    vz2 += vz * vz;
   }
-  return (vx2 + vy2 + vz2) / N;
+  return (vx2 + vy2 + vz2) * inv_N;
 }
 
 //  Function to calculate the kinetic energy of the system
 double Kinetic() {
-  double kin = 0.;
+  const double half_m = 0.5 * m;
+  double v2_sum = 0.0;
 
-#pragma omp parallel for reduction(+ : kin) schedule(static)
+#pragma omp parallel for reduction(+ : v2_sum) schedule(static)
   for (int i = 0; i < N; i++) {
-    double v2 = 0.;
-    for (int j = 0; j < 3; j++) {
-      v2 += v[i][j] * v[i][j];
-    }
-    kin += m * v2 / 2.;
+    double vx = v[i][0];
+    double vy = v[i][1];
+    double vz = v[i][2];
+    v2_sum += vx * vx + vy * vy + vz * vz;
   }
-  return kin;
+  return half_m * v2_sum;
 }
 
 // Function to calculate the potential energy of the system
-
 double Potential() {
+  // 2.0 (simetria dos pares (i,j) e (j,i)) * 4.0 * epsilon = 8.0 * epsilon
+  const double pot_factor = 8.0 * epsilon;
   double Pot = 0.0;
-  int i;
 
 #pragma omp parallel for reduction(+ : Pot) schedule(dynamic, 16)
-  for (i = 0; i < N - 1; i++) {
+  for (int i = 0; i < N - 1; i++) {
     double rxi = r[i][0];
     double ryi = r[i][1];
     double rzi = r[i][2];
@@ -478,32 +489,32 @@ double Potential() {
       double dy = ryi - r[j][1];
       double dz = rzi - r[j][2];
 
-      double rSqd = dx * dx + dy * dy + dz * dz;
-      double inv_r2 = 1.0 / rSqd;
+      double r2 = dx * dx + dy * dy + dz * dz;
+      double inv_r2 = 1.0 / r2;
       double inv_r6 = inv_r2 * inv_r2 * inv_r2;
 
       local_pot += (inv_r6 * inv_r6 - inv_r6);
     }
     Pot += local_pot;
   }
-  // Multiplica por 2.0 devido à simetria dos pares (i,j) e (j,i)
-  return 2.0 * 4.0 * epsilon * Pot;
+
+  return pot_factor * Pot;
 }
 
 //   Uses the derivative of the Lennard-Jones potential to calculate
 //   the forces on each atom.  Then uses a = F/m to calculate the
 //   accelleration of each atom.
 void computeAccelerations() {
-  int i;
+  const double c24 = 24.0;
 
 #pragma omp parallel for schedule(static)
-  for (i = 0; i < N; i++) {
+  for (int i = 0; i < N; i++) {
     double rxi = r[i][0];
     double ryi = r[i][1];
     double rzi = r[i][2];
 
-    // Acumuladores locais em registo (evita False Sharing na matriz 'a' e
-    // dispensa o ciclo de limpeza)
+    // Acumuladores locais em registo (evita Data Races sem escrita em a[j],
+    // evita False Sharing na matriz 'a' e dispensa o ciclo de limpeza)
     double ax = 0.0, ay = 0.0, az = 0.0;
 
     for (int j = 0; j < N; j++) {
@@ -521,7 +532,7 @@ void computeAccelerations() {
       double inv_r8 = inv_r4 * inv_r4;
       double inv_r14 = inv_r8 * inv_r4 * inv_r2;
 
-      double f = 24.0 * (2.0 * inv_r14 - inv_r8);
+      double f = c24 * (2.0 * inv_r14 - inv_r8);
 
       ax += dx * f;
       ay += dy * f;
@@ -537,14 +548,19 @@ void computeAccelerations() {
 
 // returns sum of dv/dt*m/A (aka Pressure) from elastic collisions with walls
 double VelocityVerlet(double dt, int iter, FILE *fp) {
-  int i, j;
-  double psum = 0.;
+  const double half_dt = 0.5 * dt;
+  const double half_dt2 = 0.5 * dt * dt;
+  const double wall_factor = 2.0 * m / dt;
+  const double inv_area = 1.0 / (6.0 * L * L);
+
+  double psum = 0.0;
 
 #pragma omp parallel for schedule(static)
-  for (i = 0; i < N; i++) {
-    for (j = 0; j < 3; j++) {
-      r[i][j] += v[i][j] * dt + 0.5 * a[i][j] * dt * dt;
-      v[i][j] += 0.5 * a[i][j] * dt;
+  for (int i = 0; i < N; i++) {
+    for (int j = 0; j < 3; j++) {
+      double aij = a[i][j];
+      r[i][j] += v[i][j] * dt + half_dt2 * aij;
+      v[i][j] += half_dt * aij;
     }
   }
 
@@ -552,30 +568,26 @@ double VelocityVerlet(double dt, int iter, FILE *fp) {
 
 // Funde a atualização de velocidade com a verificação das paredes elásticas
 #pragma omp parallel for reduction(+ : psum) schedule(static)
-  for (i = 0; i < N; i++) {
-    for (j = 0; j < 3; j++) {
-      v[i][j] += 0.5 * a[i][j] * dt;
+  for (int i = 0; i < N; i++) {
+    for (int j = 0; j < 3; j++) {
+      double vij = v[i][j] + half_dt * a[i][j];
+      double rij = r[i][j];
 
-      if (r[i][j] < 0.) {
-        v[i][j] *= -1.;
-        psum += 2 * m * fabs(v[i][j]) / dt;
+      if (rij < 0.0 || rij >= L) {
+        vij = -vij;
+        psum += wall_factor * fabs(vij);
       }
-      if (r[i][j] >= L) {
-        v[i][j] *= -1.;
-        psum += 2 * m * fabs(v[i][j]) / dt;
-      }
+      v[i][j] = vij;
     }
   }
 
-  return psum / (6 * L * L);
+  return psum * inv_area;
 }
 
 void initializeVelocities() {
-
   int i, j;
 
   for (i = 0; i < N; i++) {
-
     for (j = 0; j < 3; j++) {
       //  Pull a number from a Gaussian Distribution
       v[i][j] = gaussdist();
@@ -583,48 +595,45 @@ void initializeVelocities() {
   }
 
   // Vcm = sum_i^N  m*v_i/  sum_i^N  M
-  // Compute center-of-mas velocity according to the formula above
-  double vCM[3] = {0, 0, 0};
+  // Compute center-of-mass velocity according to the formula above
+  double vCM[3] = {0.0, 0.0, 0.0};
 
   for (i = 0; i < N; i++) {
-    for (j = 0; j < 3; j++) {
-
-      vCM[j] += m * v[i][j];
-    }
+    vCM[0] += m * v[i][0];
+    vCM[1] += m * v[i][1];
+    vCM[2] += m * v[i][2];
   }
 
+  const double inv_Nm = 1.0 / (N * m);
   for (i = 0; i < 3; i++)
-    vCM[i] /= N * m;
+    vCM[i] *= inv_Nm;
 
-  //  Subtract out the center-of-mass velocity from the
-  //  velocity of each particle... effectively set the
-  //  center of mass velocity to zero so that the system does
-  //  not drift in space!
+  //  Subtract out the center-of-mass velocity and accumulate vSqdSum in one pass
+  double vcm0 = vCM[0];
+  double vcm1 = vCM[1];
+  double vcm2 = vCM[2];
+  double vSqdSum = 0.0;
+
   for (i = 0; i < N; i++) {
-    for (j = 0; j < 3; j++) {
+    double vx = v[i][0] - vcm0;
+    double vy = v[i][1] - vcm1;
+    double vz = v[i][2] - vcm2;
 
-      v[i][j] -= vCM[j];
-    }
+    v[i][0] = vx;
+    v[i][1] = vy;
+    v[i][2] = vz;
+
+    vSqdSum += vx * vx + vy * vy + vz * vz;
   }
 
   //  Now we want to scale the average velocity of the system
   //  by a factor which is consistent with our initial temperature, Tinit
-  double vSqdSum, lambda;
-  vSqdSum = 0.;
-  for (i = 0; i < N; i++) {
-    for (j = 0; j < 3; j++) {
-
-      vSqdSum += v[i][j] * v[i][j];
-    }
-  }
-
-  lambda = sqrt(3 * (N - 1) * Tinit / vSqdSum);
+  const double lambda = sqrt(3.0 * (N - 1) * Tinit / vSqdSum);
 
   for (i = 0; i < N; i++) {
-    for (j = 0; j < 3; j++) {
-
-      v[i][j] *= lambda;
-    }
+    v[i][0] *= lambda;
+    v[i][1] *= lambda;
+    v[i][2] *= lambda;
   }
 }
 
