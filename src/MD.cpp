@@ -50,14 +50,14 @@ double Tinit; // 2;
 //  Vectors!
 //
 const int MAXPART = 5001;
-//  Position
-double r[MAXPART][3];
+//  Position (SoA alinhado a 64 bytes para vetorização ARM SVE)
+alignas(64) double rx[MAXPART], ry[MAXPART], rz[MAXPART];
 //  Velocity
-double v[MAXPART][3];
+alignas(64) double vx[MAXPART], vy[MAXPART], vz[MAXPART];
 //  Acceleration
-double a[MAXPART][3];
-//  Force
-double F[MAXPART][3];
+alignas(64) double ax[MAXPART], ay[MAXPART], az[MAXPART];
+//  Energia potencial em cache (calculada dentro de computeAccelerations)
+double cached_PE = 0.0;
 
 // atom type
 char atype[10];
@@ -247,6 +247,10 @@ int main() {
       ofn,
       "w"); //  Output of other quantities (T, P, gc, etc) at every timestep
   afp = fopen(afn, "w"); //  Average T, P, gc, etc from the simulation
+  if (!tfp || !ofp || !afp) {
+    perror("Erro ao abrir ficheiros de output");
+    exit(1);
+  }
 
   int NumTime;
   if (strcmp(atype, "He") == 0) {
@@ -413,10 +417,9 @@ void initialize() {
     for (j = 0; j < n; j++) {
       for (k = 0; k < n; k++) {
         if (p < N) {
-
-          r[p][0] = (i + 0.5) * pos;
-          r[p][1] = (j + 0.5) * pos;
-          r[p][2] = (k + 0.5) * pos;
+          rx[p] = (i + 0.5) * pos;
+          ry[p] = (j + 0.5) * pos;
+          rz[p] = (k + 0.5) * pos;
         }
         p++;
       }
@@ -429,12 +432,12 @@ void initialize() {
   /***********************************************
    *   Uncomment if you want to see what the initial positions and velocities
    are printf("  Printing initial positions!\n"); for (i=0; i<N; i++) { printf("
-   %6.3e  %6.3e  %6.3e\n",r[i][0],r[i][1],r[i][2]);
+   %6.3e  %6.3e  %6.3e\n",rx[i],ry[i],rz[i]);
    }
 
    printf("  Printing initial velocities!\n");
    for (i=0; i<N; i++) {
-   printf("  %6.3e  %6.3e  %6.3e\n",v[i][0],v[i][1],v[i][2]);
+   printf("  %6.3e  %6.3e  %6.3e\n",vx[i],vy[i],vz[i]);
    }
    */
 }
@@ -446,12 +449,12 @@ double MeanSquaredVelocity() {
 
 #pragma omp parallel for reduction(+ : vx2, vy2, vz2) schedule(static)
   for (int i = 0; i < N; i++) {
-    double vx = v[i][0];
-    double vy = v[i][1];
-    double vz = v[i][2];
-    vx2 += vx * vx;
-    vy2 += vy * vy;
-    vz2 += vz * vz;
+    double vxi = vx[i];
+    double vyi = vy[i];
+    double vzi = vz[i];
+    vx2 += vxi * vxi;
+    vy2 += vyi * vyi;
+    vz2 += vzi * vzi;
   }
   return (vx2 + vy2 + vz2) * inv_N;
 }
@@ -463,87 +466,75 @@ double Kinetic() {
 
 #pragma omp parallel for reduction(+ : v2_sum) schedule(static)
   for (int i = 0; i < N; i++) {
-    double vx = v[i][0];
-    double vy = v[i][1];
-    double vz = v[i][2];
-    v2_sum += vx * vx + vy * vy + vz * vz;
+    double vxi = vx[i];
+    double vyi = vy[i];
+    double vzi = vz[i];
+    v2_sum += vxi * vxi + vyi * vyi + vzi * vzi;
   }
   return half_m * v2_sum;
 }
 
 // Function to calculate the potential energy of the system
-double Potential() {
-  // 2.0 (simetria dos pares (i,j) e (j,i)) * 4.0 * epsilon = 8.0 * epsilon
-  const double pot_factor = 8.0 * epsilon;
-  double Pot = 0.0;
-
-#pragma omp parallel for reduction(+ : Pot) schedule(dynamic, 16)
-  for (int i = 0; i < N - 1; i++) {
-    double rxi = r[i][0];
-    double ryi = r[i][1];
-    double rzi = r[i][2];
-    double local_pot = 0.0;
-
-    for (int j = i + 1; j < N; j++) {
-      double dx = rxi - r[j][0];
-      double dy = ryi - r[j][1];
-      double dz = rzi - r[j][2];
-
-      double r2 = dx * dx + dy * dy + dz * dz;
-      double inv_r2 = 1.0 / r2;
-      double inv_r6 = inv_r2 * inv_r2 * inv_r2;
-
-      local_pot += (inv_r6 * inv_r6 - inv_r6);
-    }
-    Pot += local_pot;
-  }
-
-  return pot_factor * Pot;
-}
+// (valor já calculado e guardado em cache por computeAccelerations)
+double Potential() { return cached_PE; }
 
 //   Uses the derivative of the Lennard-Jones potential to calculate
 //   the forces on each atom.  Then uses a = F/m to calculate the
-//   accelleration of each atom.
+//   accelleration of each atom. Also computes and caches potential energy.
 void computeAccelerations() {
   const double c24 = 24.0;
+  double Pot = 0.0;
 
-#pragma omp parallel for schedule(static)
+#pragma omp parallel for reduction(+ : Pot) schedule(static)
   for (int i = 0; i < N; i++) {
-    double rxi = r[i][0];
-    double ryi = r[i][1];
-    double rzi = r[i][2];
+    double rxi = rx[i];
+    double ryi = ry[i];
+    double rzi = rz[i];
 
-    // Acumuladores locais em registo (evita Data Races sem escrita em a[j],
-    // evita False Sharing na matriz 'a' e dispensa o ciclo de limpeza)
-    double ax = 0.0, ay = 0.0, az = 0.0;
+    // Acumuladores locais em registo (evita Data Races, False Sharing e ciclo
+    // de limpeza de ax/ay/az)
+    double axi = 0.0, ayi = 0.0, azi = 0.0;
+    double local_pot = 0.0;
 
-    for (int j = 0; j < N; j++) {
-      if (i == j)
-        continue;
-
-      double dx = rxi - r[j][0];
-      double dy = ryi - r[j][1];
-      double dz = rzi - r[j][2];
-
+#pragma omp simd reduction(+ : axi, ayi, azi, local_pot)
+    for (int j = 0; j < i; j++) {
+      double dx = rxi - rx[j];
+      double dy = ryi - ry[j];
+      double dz = rzi - rz[j];
       double rSqd = dx * dx + dy * dy + dz * dz;
-
       double inv_r2 = 1.0 / rSqd;
-      double inv_r4 = inv_r2 * inv_r2;
-      double inv_r8 = inv_r4 * inv_r4;
-      double inv_r14 = inv_r8 * inv_r4 * inv_r2;
-
-      double f = c24 * (2.0 * inv_r14 - inv_r8);
-
-      ax += dx * f;
-      ay += dy * f;
-      az += dz * f;
+      double inv_r6 = inv_r2 * inv_r2 * inv_r2;
+      local_pot += inv_r6 * (inv_r6 - 1.0);
+      double f = c24 * inv_r2 * inv_r6 * (2.0 * inv_r6 - 1.0);
+      axi += dx * f;
+      ayi += dy * f;
+      azi += dz * f;
     }
 
+#pragma omp simd reduction(+ : axi, ayi, azi, local_pot)
+    for (int j = i + 1; j < N; j++) {
+      double dx = rxi - rx[j];
+      double dy = ryi - ry[j];
+      double dz = rzi - rz[j];
+      double rSqd = dx * dx + dy * dy + dz * dz;
+      double inv_r2 = 1.0 / rSqd;
+      double inv_r6 = inv_r2 * inv_r2 * inv_r2;
+      local_pot += inv_r6 * (inv_r6 - 1.0);
+      double f = c24 * inv_r2 * inv_r6 * (2.0 * inv_r6 - 1.0);
+      axi += dx * f;
+      ayi += dy * f;
+      azi += dz * f;
+    }
+
+    Pot += local_pot;
     // Escreve na memória partilhada apenas uma vez no final
-    a[i][0] = ax;
-    a[i][1] = ay;
-    a[i][2] = az;
+    ax[i] = axi;
+    ay[i] = ayi;
+    az[i] = azi;
   }
+
+  // Todos os pares ordenados (i, j) com i != j já foram somados: fator 4.0 * epsilon
+  cached_PE = 4.0 * epsilon * Pot;
 }
 
 // returns sum of dv/dt*m/A (aka Pressure) from elastic collisions with walls
@@ -557,11 +548,17 @@ double VelocityVerlet(double dt, int iter, FILE *fp) {
 
 #pragma omp parallel for schedule(static)
   for (int i = 0; i < N; i++) {
-    for (int j = 0; j < 3; j++) {
-      double aij = a[i][j];
-      r[i][j] += v[i][j] * dt + half_dt2 * aij;
-      v[i][j] += half_dt * aij;
-    }
+    double axi = ax[i];
+    double ayi = ay[i];
+    double azi = az[i];
+
+    rx[i] += vx[i] * dt + half_dt2 * axi;
+    ry[i] += vy[i] * dt + half_dt2 * ayi;
+    rz[i] += vz[i] * dt + half_dt2 * azi;
+
+    vx[i] += half_dt * axi;
+    vy[i] += half_dt * ayi;
+    vz[i] += half_dt * azi;
   }
 
   computeAccelerations();
@@ -569,61 +566,73 @@ double VelocityVerlet(double dt, int iter, FILE *fp) {
 // Funde a atualização de velocidade com a verificação das paredes elásticas
 #pragma omp parallel for reduction(+ : psum) schedule(static)
   for (int i = 0; i < N; i++) {
-    for (int j = 0; j < 3; j++) {
-      double vij = v[i][j] + half_dt * a[i][j];
-      double rij = r[i][j];
+    double vxi = vx[i] + half_dt * ax[i];
+    double vyi = vy[i] + half_dt * ay[i];
+    double vzi = vz[i] + half_dt * az[i];
 
-      if (rij < 0.0 || rij >= L) {
-        vij = -vij;
-        psum += wall_factor * fabs(vij);
-      }
-      v[i][j] = vij;
+    double rxi = rx[i];
+    double ryi = ry[i];
+    double rzi = rz[i];
+
+    if (rxi < 0.0 || rxi >= L) {
+      vxi = -vxi;
+      psum += wall_factor * fabs(vxi);
     }
+    if (ryi < 0.0 || ryi >= L) {
+      vyi = -vyi;
+      psum += wall_factor * fabs(vyi);
+    }
+    if (rzi < 0.0 || rzi >= L) {
+      vzi = -vzi;
+      psum += wall_factor * fabs(vzi);
+    }
+
+    vx[i] = vxi;
+    vy[i] = vyi;
+    vz[i] = vzi;
   }
 
   return psum * inv_area;
 }
 
 void initializeVelocities() {
-  int i, j;
+  int i;
 
   for (i = 0; i < N; i++) {
-    for (j = 0; j < 3; j++) {
-      //  Pull a number from a Gaussian Distribution
-      v[i][j] = gaussdist();
-    }
+    //  Pull numbers from a Gaussian Distribution (ordem exata: x, y, z)
+    vx[i] = gaussdist();
+    vy[i] = gaussdist();
+    vz[i] = gaussdist();
   }
 
   // Vcm = sum_i^N  m*v_i/  sum_i^N  M
   // Compute center-of-mass velocity according to the formula above
-  double vCM[3] = {0.0, 0.0, 0.0};
+  double vCMx = 0.0, vCMy = 0.0, vCMz = 0.0;
 
   for (i = 0; i < N; i++) {
-    vCM[0] += m * v[i][0];
-    vCM[1] += m * v[i][1];
-    vCM[2] += m * v[i][2];
+    vCMx += m * vx[i];
+    vCMy += m * vy[i];
+    vCMz += m * vz[i];
   }
 
   const double inv_Nm = 1.0 / (N * m);
-  for (i = 0; i < 3; i++)
-    vCM[i] *= inv_Nm;
+  vCMx *= inv_Nm;
+  vCMy *= inv_Nm;
+  vCMz *= inv_Nm;
 
   //  Subtract out the center-of-mass velocity and accumulate vSqdSum in one pass
-  double vcm0 = vCM[0];
-  double vcm1 = vCM[1];
-  double vcm2 = vCM[2];
   double vSqdSum = 0.0;
 
   for (i = 0; i < N; i++) {
-    double vx = v[i][0] - vcm0;
-    double vy = v[i][1] - vcm1;
-    double vz = v[i][2] - vcm2;
+    double vxi = vx[i] - vCMx;
+    double vyi = vy[i] - vCMy;
+    double vzi = vz[i] - vCMz;
 
-    v[i][0] = vx;
-    v[i][1] = vy;
-    v[i][2] = vz;
+    vx[i] = vxi;
+    vy[i] = vyi;
+    vz[i] = vzi;
 
-    vSqdSum += vx * vx + vy * vy + vz * vz;
+    vSqdSum += vxi * vxi + vyi * vyi + vzi * vzi;
   }
 
   //  Now we want to scale the average velocity of the system
@@ -631,9 +640,9 @@ void initializeVelocities() {
   const double lambda = sqrt(3.0 * (N - 1) * Tinit / vSqdSum);
 
   for (i = 0; i < N; i++) {
-    v[i][0] *= lambda;
-    v[i][1] *= lambda;
-    v[i][2] *= lambda;
+    vx[i] *= lambda;
+    vy[i] *= lambda;
+    vz[i] *= lambda;
   }
 }
 
