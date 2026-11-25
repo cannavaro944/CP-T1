@@ -536,10 +536,6 @@ void computeAccelerations() {
 }
 
 // returns sum of dv/dt*m/A (aka Pressure) from elastic collisions with walls
-#if defined(__GNUC__) && !defined(__clang__)
-#pragma GCC push_options
-#pragma GCC optimize("fp-contract=off")
-#endif
 double VelocityVerlet(double dt, int iter, FILE *fp) {
   const double half_dt = 0.5 * dt;
   const double half_dt2 = 0.5 * dt * dt;
@@ -554,20 +550,15 @@ double VelocityVerlet(double dt, int iter, FILE *fp) {
     double ayi = ay[i];
     double azi = az[i];
 
-    double dx = vx[i] * dt;
-    double dy = vy[i] * dt;
-    double dz = vz[i] * dt;
-    double d2x = half_dt2 * axi;
-    double d2y = half_dt2 * ayi;
-    double d2z = half_dt2 * azi;
-    double dvx = half_dt * axi;
-    double dvy = half_dt * ayi;
-    double dvz = half_dt * azi;
-#if defined(__aarch64__)
-    asm volatile("" : "+w"(dx), "+w"(dy), "+w"(dz), "+w"(d2x), "+w"(d2y), "+w"(d2z), "+w"(dvx), "+w"(dvy), "+w"(dvz));
-#elif defined(__x86_64__)
-    asm volatile("" : "+x"(dx), "+x"(dy), "+x"(dz), "+x"(d2x), "+x"(d2y), "+x"(d2z), "+x"(dvx), "+x"(dvy), "+x"(dvz));
-#endif
+    volatile double dx = vx[i] * dt;
+    volatile double dy = vy[i] * dt;
+    volatile double dz = vz[i] * dt;
+    volatile double d2x = half_dt2 * axi;
+    volatile double d2y = half_dt2 * ayi;
+    volatile double d2z = half_dt2 * azi;
+    volatile double dvx = half_dt * axi;
+    volatile double dvy = half_dt * ayi;
+    volatile double dvz = half_dt * azi;
 
     rx[i] += dx + d2x;
     ry[i] += dy + d2y;
@@ -583,14 +574,9 @@ double VelocityVerlet(double dt, int iter, FILE *fp) {
 // Funde a atualização de velocidade com a verificação das paredes elásticas
 #pragma omp parallel for reduction(+ : psum) schedule(static)
   for (int i = 0; i < N; i++) {
-    double dvx = half_dt * ax[i];
-    double dvy = half_dt * ay[i];
-    double dvz = half_dt * az[i];
-#if defined(__aarch64__)
-    asm volatile("" : "+w"(dvx), "+w"(dvy), "+w"(dvz));
-#elif defined(__x86_64__)
-    asm volatile("" : "+x"(dvx), "+x"(dvy), "+x"(dvz));
-#endif
+    volatile double dvx = half_dt * ax[i];
+    volatile double dvy = half_dt * ay[i];
+    volatile double dvz = half_dt * az[i];
 
     double vxi = vx[i] + dvx;
     double vyi = vy[i] + dvy;
@@ -602,32 +588,17 @@ double VelocityVerlet(double dt, int iter, FILE *fp) {
 
     if (rxi < 0.0 || rxi >= L) {
       vxi = -vxi;
-      double dp = wall_factor * fabs(vxi);
-#if defined(__aarch64__)
-      asm volatile("" : "+w"(dp));
-#elif defined(__x86_64__)
-      asm volatile("" : "+x"(dp));
-#endif
+      volatile double dp = wall_factor * fabs(vxi);
       psum += dp;
     }
     if (ryi < 0.0 || ryi >= L) {
       vyi = -vyi;
-      double dp = wall_factor * fabs(vyi);
-#if defined(__aarch64__)
-      asm volatile("" : "+w"(dp));
-#elif defined(__x86_64__)
-      asm volatile("" : "+x"(dp));
-#endif
+      volatile double dp = wall_factor * fabs(vyi);
       psum += dp;
     }
     if (rzi < 0.0 || rzi >= L) {
       vzi = -vzi;
-      double dp = wall_factor * fabs(vzi);
-#if defined(__aarch64__)
-      asm volatile("" : "+w"(dp));
-#elif defined(__x86_64__)
-      asm volatile("" : "+x"(dp));
-#endif
+      volatile double dp = wall_factor * fabs(vzi);
       psum += dp;
     }
 
@@ -638,9 +609,6 @@ double VelocityVerlet(double dt, int iter, FILE *fp) {
 
   return psum * inv_area;
 }
-#if defined(__GNUC__) && !defined(__clang__)
-#pragma GCC pop_options
-#endif
 
 void initializeVelocities() {
   int i;
